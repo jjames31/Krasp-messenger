@@ -1,0 +1,25 @@
+[Unit]
+Description=Kaonic UDP Messenger
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=kaonic
+Group=kaonic
+WorkingDirectory=/opt/kaonic-messenger
+Environment=PYTHONDONTWRITEBYTECODE=1
+Environment=KAONIC_CALLSIGN=kaonic-pi
+Environment=KAONIC_PORT=6969
+EnvironmentFile=-/etc/default/kaonic-messenger
+ExecStart=/usr/bin/python3 /opt/kaonic-messenger/app.py --callsign ${KAONIC_CALLSIGN} --port ${KAONIC_PORT} --daemon --contacts /etc/kaonic-messenger/contacts.json
+Restart=on-failure
+RestartSec=3
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectHome=true
+ProtectSystem=strict
+RestrictAddressFamilies=AF_INET AF_UNIX
+
+[Install]
+WantedBy=multi-user.target

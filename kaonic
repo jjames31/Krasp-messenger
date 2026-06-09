@@ -1,0 +1,99 @@
+#!/usr/bin/env bash
+set -Eeuo pipefail
+
+INSTALL_DIR="${KAONIC_INSTALL_DIR:-/opt/kaonic-messenger}"
+DEFAULTS_FILE="${KAONIC_DEFAULTS_FILE:-/etc/default/kaonic-messenger}"
+CONTACTS_FILE="${KAONIC_CONTACTS_FILE:-/etc/kaonic-messenger/contacts.json}"
+SERVICE_NAME="${KAONIC_SERVICE_NAME:-kaonic-messenger.service}"
+
+show_help() {
+    cat <<'EOF'
+Usage:
+  kaonic                         Open the terminal chat
+  kaonic send RECEIVER message  Send one message
+  kaonic status                 Show receiver service status
+  kaonic logs                   Follow received messages
+  kaonic restart                Restart the receiver service
+EOF
+}
+
+if [[ "${1:-}" =~ ^(help|-h|--help)$ ]]; then
+    show_help
+    exit 0
+fi
+
+if [[ ! -r "$DEFAULTS_FILE" ]]; then
+    printf 'Kaonic is not configured. Run the installer first.\n' >&2
+    exit 1
+fi
+
+# The installer only writes validated callsigns and numeric ports here.
+# shellcheck disable=SC1090
+source "$DEFAULTS_FILE"
+
+run_systemctl() {
+    if [[ "$EUID" -eq 0 ]]; then
+        systemctl "$@"
+    else
+        sudo systemctl "$@"
+    fi
+}
+
+run_chat() {
+    KAONIC_RESTART_SERVICE=false
+    if systemctl is-active --quiet "$SERVICE_NAME" 2>/dev/null; then
+        KAONIC_RESTART_SERVICE=true
+        printf 'Pausing the background receiver while the terminal is open...\n'
+        run_systemctl stop "$SERVICE_NAME"
+    fi
+
+    restart_receiver() {
+        if [[ "${KAONIC_RESTART_SERVICE:-false}" == true ]]; then
+            printf '\nRestarting the background receiver...\n'
+            run_systemctl start "$SERVICE_NAME"
+        fi
+    }
+    trap restart_receiver EXIT
+
+    python3 "$INSTALL_DIR/app.py" \
+        --callsign "$KAONIC_CALLSIGN" \
+        --port "$KAONIC_PORT" \
+        --contacts "$CONTACTS_FILE" \
+        "$@"
+}
+
+case "${1:-chat}" in
+    chat)
+        shift || true
+        run_chat "$@"
+        ;;
+    send)
+        [[ $# -ge 3 ]] || {
+            printf 'Usage: kaonic send RECEIVER message\n' >&2
+            exit 2
+        }
+        receiver="$2"
+        shift 2
+        python3 "$INSTALL_DIR/app.py" \
+            --callsign "$KAONIC_CALLSIGN" \
+            --port "$KAONIC_PORT" \
+            --contacts "$CONTACTS_FILE" \
+            --send "$receiver" "$*"
+        ;;
+    status)
+        systemctl status "$SERVICE_NAME"
+        ;;
+    logs)
+        journalctl -u "$SERVICE_NAME" -f
+        ;;
+    restart)
+        run_systemctl restart "$SERVICE_NAME"
+        ;;
+    help|-h|--help)
+        show_help
+        ;;
+    *)
+        printf 'Unknown command: %s\nRun "kaonic help" for commands.\n' "$1" >&2
+        exit 2
+        ;;
+esac
