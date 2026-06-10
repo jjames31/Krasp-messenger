@@ -22,23 +22,23 @@ the Pi.
 kaonic
 ```
 
-For an unattended installation:
+For an unattended installation, configure each node with generic names such as
+`pi-a` and `pi-b`:
 
 ```bash
 sudo ./install.sh --non-interactive \
-  --callsign office-pi \
-  --peer kitchen-pi=kitchen-pi.local \
-  --peer garage-pi=garage-pi.local
+  --callsign pi-a \
+  --peer pi-b=pi-b.local
 ```
 
 ## Commands
 
 ```bash
-kaonic                              # open terminal chat
-kaonic send kitchen-pi "Hello"      # send one message
-kaonic status                       # service status
-kaonic logs                         # follow received messages
-kaonic restart                      # reload configuration
+kaonic                         # open terminal chat
+kaonic send pi-b "Hello"       # send one message
+kaonic status                  # service status
+kaonic logs                    # follow received messages
+kaonic restart                 # reload configuration
 ```
 
 Inside the terminal, use `/receiver`, `/to`, `/callsign`, `/contacts`,
