@@ -1,8 +1,8 @@
 # Krasp Messenger
 
-Krasp Messenger is a small UDP chat tool for two nodes on a trusted local
-network. Each node listens on UDP port `6969`, sends simple JSON packets, and
-acks messages when they arrive.
+Krasp Messenger is a small UDP chat tool for nodes on a trusted local network.
+Each node listens on UDP port `6969`, sends simple JSON packets, and acks
+messages when they arrive.
 
 I mainly use it for quick node-to-node testing, so it does not try to be a
 secure chat app. Keep it on your LAN, VPN, or another network you trust.
@@ -39,14 +39,25 @@ sudo ./install.sh --non-interactive \
   --peer node-a=node-a.local
 ```
 
+`.local` hostnames depend on mDNS. If a network blocks multicast or the target
+is not advertising mDNS, use a fixed IP address instead:
+
+```bash
+sudo ./install.sh --non-interactive \
+  --callsign node-a \
+  --peer node-b=192.168.1.42
+```
+
 ## Commands
 
 ```bash
 kaonic                            # open terminal chat
 kaonic send node-b "Hello"        # send one message
+kaonic inbox                      # show recent received messages
 kaonic status                     # service status
 kaonic logs                       # follow received messages
-kaonic restart                    # reload configuration
+kaonic reload                     # reload contacts without restart
+kaonic restart                    # restart the receiver service
 ```
 
 Inside the terminal:
@@ -61,8 +72,11 @@ Inside the terminal:
 /quit                  exit
 ```
 
-Temporary receivers only last until the terminal exits. Add them to
-`contacts.json`, or run the installer again, to keep them permanently.
+Receivers added in the terminal are saved in the user's config file under
+`~/.config/krasp/contacts.json`. System contacts from the installer live in
+`/etc/kaonic-messenger/contacts.json`.
 
-Persistent contacts are stored in `/etc/kaonic-messenger/contacts.json`.
-Devices that advertise `.local` hostnames do not need fixed IP addresses.
+Received messages are appended to an inbox file so they can be reviewed later.
+Use `kaonic inbox` to show recent messages. The background service writes to
+`/var/lib/kaonic-messenger/inbox.jsonl`; the interactive terminal writes to
+`~/.local/state/krasp/inbox.jsonl`.
