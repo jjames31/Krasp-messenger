@@ -1,8 +1,9 @@
-"""Kaonic UDP messenger for Raspberry Pi and other Linux devices."""
+"""Krasp UDP messenger for Linux devices."""
 
 import argparse
 from collections import deque
 from datetime import datetime
+import ipaddress
 import json
 import logging
 from pathlib import Path
@@ -10,6 +11,7 @@ import re
 import signal
 import socket
 import threading
+import time
 
 from protocol import (
     MAX_DATAGRAM_BYTES,
@@ -23,7 +25,7 @@ from udp import UdpTransport
 
 DEFAULT_PORT = 6969
 DEFAULT_CONTACTS = Path(__file__).with_name("contacts.json")
-LOGGER = logging.getLogger("kaonic")
+LOGGER = logging.getLogger("krasp")
 ANSI_RESET = "\033[0m"
 ANSI_BOLD = "\033[1m"
 ANSI_DIM = "\033[90m"
@@ -32,7 +34,6 @@ ANSI_RED = "\033[31m"
 
 
 def _fmt_time(unix_ts):
-    """Format a Unix timestamp for compact terminal display."""
     try:
         return datetime.fromtimestamp(int(unix_ts)).strftime("%H:%M")
     except (OSError, OverflowError, TypeError, ValueError):
@@ -40,17 +41,14 @@ def _fmt_time(unix_ts):
 
 
 def _warn(message):
-    """Print a highlighted terminal warning."""
     print(f"{ANSI_RED}! {message}{ANSI_RESET}")
 
 
 def _info(message):
-    """Print a dim terminal note."""
     print(f"{ANSI_DIM}  {message}{ANSI_RESET}")
 
 
 def validate_callsign(callsign):
-    """Validate a callsign used to identify a Kaonic node."""
     if not isinstance(callsign, str) or not callsign.strip():
         raise ValueError("callsign cannot be empty")
     callsign = callsign.strip()
@@ -62,7 +60,6 @@ def validate_callsign(callsign):
 
 
 def parse_peer(peer_text):
-    """Parse a peer in the form NAME=HOST or NAME=HOST:PORT."""
     name, separator, address = peer_text.partition("=")
     if not separator or not name or not address:
         raise ValueError("peer must use the format NAME=HOST or NAME=HOST:PORT")
@@ -84,15 +81,18 @@ def parse_peer(peer_text):
 
 
 def validate_port(port):
-    """Validate a UDP port."""
-    if not isinstance(port, int) or isinstance(port, bool) or not 1 <= port <= 65535:
+    # bool is an int subclass, but True/False should not be accepted as ports.
+    if isinstance(port, bool) or not isinstance(port, int) or not 1 <= port <= 65535:
         raise ValueError("port must be between 1 and 65535")
 
 
-def load_contacts(path, default_port):
-    """Load peers from a Kaonic contacts JSON file."""
+def load_contacts(path, default_port, warn_missing=True):
+    if not path:
+        return {}
+    path = Path(path)
     if not path.exists():
-        LOGGER.warning("contacts file does not exist: %s", path)
+        if warn_missing:
+            LOGGER.warning("contacts file does not exist: %s", path)
         return {}
 
     try:
@@ -125,12 +125,105 @@ def load_contacts(path, default_port):
     return peers
 
 
-class KaonicChat:  # pylint: disable=too-many-instance-attributes
-    """A single Kaonic node that sends and receives UDP messages."""
+def save_peer(path, name, host, port):
+    path = Path(path)
+    peers = load_contacts(path, port, warn_missing=False)
+    peers[name] = (host, port)
+    document = {
+        "peers": {
+            peer_name: {"host": peer_host, "port": peer_port}
+            for peer_name, (peer_host, peer_port) in sorted(peers.items())
+        }
+    }
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp_path = path.with_suffix(path.suffix + ".tmp")
+    tmp_path.write_text(json.dumps(document, indent=2) + "\n", encoding="utf-8")
+    tmp_path.replace(path)
 
-    def __init__(self, name, listen_ip, port, peers):
+
+def append_inbox(path, packet, address):
+    if not path:
+        return
+
+    entry = {
+        "received_at": int(time.time()),
+        "sent_at": packet.get("sent_at"),
+        "id": packet.get("id"),
+        "sender": packet.get("sender"),
+        "recipient": packet.get("recipient"),
+        "body": packet.get("body"),
+        "source": f"{address[0]}:{address[1]}",
+    }
+
+    path = Path(path)
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with path.open("a", encoding="utf-8") as inbox_file:
+            inbox_file.write(json.dumps(entry, ensure_ascii=False) + "\n")
+    except OSError as error:
+        LOGGER.warning("could not write inbox entry to %s: %s", path, error)
+
+
+def show_inbox(paths, limit):
+    entries = []
+    for path in paths:
+        path = Path(path)
+        if not path.exists():
+            continue
+        try:
+            with path.open(encoding="utf-8") as inbox_file:
+                for line in inbox_file:
+                    try:
+                        entry = json.loads(line)
+                    except json.JSONDecodeError:
+                        continue
+                    entry["_path"] = str(path)
+                    entries.append(entry)
+        except OSError as error:
+            _warn(f"Could not read inbox {path}: {error}")
+
+    if not entries:
+        _info("No inbox messages found")
+        return 0
+
+    entries.sort(key=lambda item: item.get("received_at") or item.get("sent_at") or 0)
+    for entry in entries[-limit:]:
+        ts = _fmt_time(entry.get("received_at") or entry.get("sent_at"))
+        sender = entry.get("sender") or "unknown"
+        body = str(entry.get("body") or "").replace("\n", " ")
+        print(f"{ts}  {sender}: {body}")
+    return 0
+
+
+def is_ipv4_address(host):
+    try:
+        ipaddress.ip_address(host)
+    except ValueError:
+        return False
+    return True
+
+
+class KaonicChat:
+    def __init__(
+        self,
+        name,
+        listen_ip,
+        port,
+        peers,
+        contacts_path=None,
+        contact_save_path=None,
+        inbox_path=None,
+        default_port=DEFAULT_PORT,
+        resolve_timeout=3.0,
+    ):
         self.name = validate_callsign(name)
         self.peers = peers
+        self.contacts_path = Path(contacts_path) if contacts_path else None
+        self.contact_save_path = Path(contact_save_path) if contact_save_path else None
+        self.inbox_path = Path(inbox_path) if inbox_path else None
+        self.default_port = default_port
+        self.resolve_timeout = max(0.1, float(resolve_timeout))
+        self.peer_lock = threading.RLock()
         self.active_receiver = None
         self.interactive = False
         self.transport = UdpTransport(listen_ip, port, MAX_DATAGRAM_BYTES + 1)
@@ -141,15 +234,12 @@ class KaonicChat:  # pylint: disable=too-many-instance-attributes
 
     @property
     def port(self):
-        """Return the actual bound UDP port."""
         return self.transport.local_address[1]
 
     def make_message(self, target, message):
-        """Create a Kaonic chat packet."""
         return create_chat(self.name, target, message)
 
     def listen_loop(self):
-        """Receive packets until the node is stopped."""
         LOGGER.info("%s listening on UDP %s:%s", self.name, *self.transport.local_address)
 
         while self.running.is_set():
@@ -171,10 +261,30 @@ class KaonicChat:  # pylint: disable=too-many-instance-attributes
             elif packet["type"] == "ack":
                 self._receive_ack(packet)
 
+    def reload_contacts(self):
+        if not self.contacts_path:
+            LOGGER.warning("no contacts file configured for reload")
+            return False
+
+        try:
+            peers = load_contacts(self.contacts_path, self.default_port, warn_missing=False)
+        except ValueError as error:
+            LOGGER.error("could not reload contacts: %s", error)
+            return False
+
+        with self.peer_lock:
+            self.peers = peers
+        LOGGER.info("reloaded %d contacts from %s", len(peers), self.contacts_path)
+        if self.interactive:
+            _info(f"Reloaded contacts from {self.contacts_path}")
+        return True
+
     def _receive_chat(self, packet, address):
         if packet["recipient"] not in (self.name, "*"):
             LOGGER.debug("ignored message addressed to %s", packet["recipient"])
             return
+
+        append_inbox(self.inbox_path, packet, address)
 
         if self.interactive:
             sent_at = _fmt_time(packet.get("sent_at"))
@@ -185,6 +295,7 @@ class KaonicChat:  # pylint: disable=too-many-instance-attributes
             print(self.terminal_prompt(), end="", flush=True)
         else:
             LOGGER.info("message from %s: %s", packet["sender"], packet["body"])
+
         ack = create_ack(self.name, packet["id"])
         try:
             self.transport.send(encode_packet(ack), address)
@@ -203,24 +314,75 @@ class KaonicChat:  # pylint: disable=too-many-instance-attributes
             self.ack_condition.notify_all()
 
     def send_to(self, target, message):
-        """Send a message and return its ID, or return None on failure."""
-        if target not in self.peers:
+        with self.peer_lock:
+            peer = self.peers.get(target)
+
+        if not peer:
             LOGGER.error("unknown peer %s; known peers: %s", target, self.peer_names())
+            if self.interactive:
+                _warn(f"Unknown receiver: {target}")
+                _info("Use /receiver CALLSIGN=HOST[:PORT] to add it.")
+            return None
+
+        address = self._resolve_peer(target, peer)
+        if address is None:
             return None
 
         packet = self.make_message(target, message)
         try:
-            self.transport.send(encode_packet(packet), self.peers[target])
+            self.transport.send(encode_packet(packet), address)
         except (OSError, ProtocolError) as error:
             LOGGER.error("could not send to %s: %s", target, error)
+            if self.interactive:
+                _warn(f"Could not send to {target}: {error}")
             return None
 
         if not self.interactive:
             LOGGER.info("sent message %s to %s", packet["id"], target)
         return packet["id"]
 
+    def _resolve_peer(self, target, peer):
+        host, port = peer
+        if is_ipv4_address(host):
+            return host, port
+
+        if self.interactive and host.endswith(".local"):
+            _info(f"Resolving {host} with mDNS...")
+
+        result = {}
+        finished = threading.Event()
+
+        def worker():
+            try:
+                info = socket.getaddrinfo(host, port, socket.AF_INET, socket.SOCK_DGRAM)
+                result["address"] = info[0][4]
+            except OSError as error:
+                result["error"] = error
+            finally:
+                finished.set()
+
+        thread = threading.Thread(target=worker, name="krasp-resolve", daemon=True)
+        thread.start()
+
+        if not finished.wait(self.resolve_timeout):
+            LOGGER.error("timed out resolving %s for %s", host, target)
+            if self.interactive:
+                _warn(f"Timed out resolving {host}")
+                if host.endswith(".local"):
+                    _info("Check mDNS/Avahi, multicast filtering, or use a fixed IP address.")
+            return None
+
+        if "error" in result:
+            LOGGER.error("could not resolve %s for %s: %s", host, target, result["error"])
+            if self.interactive:
+                _warn(f"Could not resolve {host}: {result['error']}")
+                if host.endswith(".local"):
+                    _info("Check mDNS/Avahi, multicast filtering, or use a fixed IP address.")
+            return None
+
+        return result["address"]
+
     def wait_for_ack(self, message_id, timeout):
-        """Wait for an acknowledgement from a peer."""
         with self.ack_condition:
             received = self.ack_condition.wait_for(
                 lambda: message_id in self.acknowledged,
@@ -231,25 +393,36 @@ class KaonicChat:  # pylint: disable=too-many-instance-attributes
             return received
 
     def peer_names(self):
-        """Return configured peer names for display."""
-        return ", ".join(sorted(self.peers)) or "(none)"
+        with self.peer_lock:
+            return ", ".join(sorted(self.peers)) or "(none)"
 
     def define_receiver(self, peer_text, default_port):
-        """Define a receiver from NAME=HOST[:PORT] and select it."""
         name, host, port = parse_peer(peer_text)
-        self.peers[name] = (host, port or default_port)
+        port = port or default_port
+        with self.peer_lock:
+            self.peers[name] = (host, port)
         self.active_receiver = name
+
+        if self.contact_save_path:
+            try:
+                save_peer(self.contact_save_path, name, host, port)
+            except (OSError, ValueError) as error:
+                LOGGER.warning("could not save receiver %s to %s: %s", name, self.contact_save_path, error)
+                if self.interactive:
+                    _warn(f"Receiver added for this session, but could not save it: {error}")
+            else:
+                if self.interactive:
+                    _info(f"Saved receiver in {self.contact_save_path}")
         return name
 
     def select_receiver(self, name):
-        """Select an existing receiver."""
-        if name not in self.peers:
-            return False
+        with self.peer_lock:
+            if name not in self.peers:
+                return False
         self.active_receiver = name
         return True
 
     def terminal_prompt(self):
-        """Return the interactive chat prompt."""
         if self.active_receiver:
             receiver_part = f"{ANSI_BOLD}{self.active_receiver}{ANSI_RESET}"
         else:
@@ -257,15 +430,13 @@ class KaonicChat:  # pylint: disable=too-many-instance-attributes
         return f"{self.name} → {receiver_part} › "
 
     def close(self):
-        """Stop the node and close its socket."""
         self.running.clear()
         self.transport.close()
 
     def input_loop(self, default_port, initial_receiver=None):
-        """Run the interactive callsign-to-callsign terminal."""
         self.interactive = True
         print("\n" + "─" * 40)
-        print("  Kaonic  |  terminal chat")
+        print("  Krasp  |  terminal chat")
         print("─" * 40)
         print(f"  You are: {ANSI_BOLD}{self.name}{ANSI_RESET}")
         print(f"  Listening on port {self.port}")
@@ -315,7 +486,8 @@ class KaonicChat:  # pylint: disable=too-many-instance-attributes
         try:
             if "=" in receiver:
                 name = self.define_receiver(receiver, default_port)
-                host, port = self.peers[name]
+                with self.peer_lock:
+                    host, port = self.peers[name]
                 _info(f"Receiver defined: {name} at {host}:{port}")
             elif self.select_receiver(receiver):
                 _info(f"Receiver selected: {receiver}")
@@ -325,59 +497,83 @@ class KaonicChat:  # pylint: disable=too-many-instance-attributes
         except ValueError as error:
             _warn(f"Invalid receiver: {error}")
 
-    def _run_terminal_command(self, line, default_port):  # pylint: disable=too-many-branches
+    def _run_terminal_command(self, line, default_port):
         command, _, argument = line.partition(" ")
         argument = argument.strip()
 
         if command in ("/help", "/?"):
-            print("  Just type to send a message to your active contact.")
-            print("  /receiver pi-b       — switch to pi-b")
-            print("  /receiver pi-b=host  — add pi-b and switch to them")
-            print("  /to pi-b hello       — one-off message")
-            print("  /contacts            — list everyone you know")
-            print("  /status              — who you are and who you're talking to")
-            print("  /callsign newname    — change your name")
-            print("  /quit                — close the terminal")
+            self._print_help()
         elif command == "/receiver":
-            if argument:
-                self._set_receiver_from_input(argument, default_port)
-            else:
-                _warn("Usage: /receiver CALLSIGN or /receiver CALLSIGN=HOST[:PORT]")
+            self._command_receiver(argument, default_port)
         elif command == "/to":
-            target, separator, message = argument.partition(" ")
-            if separator and message:
-                self.send_to(target, message)
-            else:
-                _warn("Usage: /to CALLSIGN message")
+            self._command_to(argument)
         elif command in ("/contacts", "/peers"):
-            for name, (host, port) in sorted(self.peers.items()):
-                selected = " *" if name == self.active_receiver else ""
-                print(f"{name}: {host}:{port}{selected}")
-            if not self.peers:
-                _info("No receivers defined")
+            self._command_contacts()
         elif command == "/callsign":
-            try:
-                self.name = validate_callsign(argument)
-                _info(f"Sender callsign changed to {self.name}")
-            except ValueError as error:
-                _warn(f"Invalid callsign: {error}")
+            self._command_callsign(argument)
         elif command == "/status":
-            receiver = self.active_receiver or "(not selected)"
-            print(f"Sender: {self.name}")
-            print(f"Receiver: {receiver}")
-            print(f"UDP port: {self.port}")
+            self._command_status()
         else:
             _warn("Unknown command. Type /help for commands.")
 
+    @staticmethod
+    def _print_help():
+        print("  Just type to send a message to your active contact.")
+        print("  /receiver node-b       — switch to node-b")
+        print("  /receiver node-b=host  — add node-b and switch to them")
+        print("  /to node-b hello       — one-off message")
+        print("  /contacts              — list everyone you know")
+        print("  /status                — who you are and who you're talking to")
+        print("  /callsign newname      — change your name")
+        print("  /quit                  — close the terminal")
+
+    def _command_receiver(self, argument, default_port):
+        if argument:
+            self._set_receiver_from_input(argument, default_port)
+        else:
+            _warn("Usage: /receiver CALLSIGN or /receiver CALLSIGN=HOST[:PORT]")
+
+    def _command_to(self, argument):
+        target, separator, message = argument.partition(" ")
+        if separator and message:
+            self.send_to(target, message)
+        else:
+            _warn("Usage: /to CALLSIGN message")
+
+    def _command_contacts(self):
+        with self.peer_lock:
+            peers = sorted(self.peers.items())
+        for name, (host, port) in peers:
+            selected = " *" if name == self.active_receiver else ""
+            print(f"{name}: {host}:{port}{selected}")
+        if not peers:
+            _info("No receivers defined")
+
+    def _command_callsign(self, argument):
+        try:
+            self.name = validate_callsign(argument)
+            _info(f"Sender callsign changed to {self.name}")
+        except ValueError as error:
+            _warn(f"Invalid callsign: {error}")
+
+    def _command_status(self):
+        receiver = self.active_receiver or "(not selected)"
+        print(f"Sender: {self.name}")
+        print(f"Receiver: {receiver}")
+        print(f"UDP port: {self.port}")
+        if self.contact_save_path:
+            print(f"User contacts: {self.contact_save_path}")
+        if self.inbox_path:
+            print(f"Inbox: {self.inbox_path}")
+
 
 def build_parser():
-    """Build the command-line parser."""
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
         "--callsign",
         "--name",
         dest="callsign",
-        help="sender callsign; defaults to the Pi hostname",
+        help="sender callsign; defaults to the system hostname",
     )
     parser.add_argument(
         "--receiver",
@@ -386,6 +582,11 @@ def build_parser():
     parser.add_argument("--listen-ip", default="0.0.0.0")
     parser.add_argument("--port", type=int, default=DEFAULT_PORT)
     parser.add_argument("--contacts", type=Path, default=DEFAULT_CONTACTS)
+    parser.add_argument("--user-contacts", type=Path)
+    parser.add_argument("--inbox", type=Path, action="append", default=[])
+    parser.add_argument("--resolve-timeout", type=float, default=3.0)
+    parser.add_argument("--bind-retries", type=int, default=3)
+    parser.add_argument("--bind-retry-delay", type=float, default=0.2)
     parser.add_argument(
         "--peer",
         action="append",
@@ -401,6 +602,14 @@ def build_parser():
         metavar=("NAME", "MESSAGE"),
         help="send one message and wait for acknowledgement",
     )
+    mode.add_argument(
+        "--show-inbox",
+        type=int,
+        nargs="?",
+        const=20,
+        metavar="COUNT",
+        help="print the most recent inbox messages",
+    )
     parser.add_argument("--ack-timeout", type=float, default=3.0)
     parser.add_argument(
         "--log-level",
@@ -411,7 +620,6 @@ def build_parser():
 
 
 def configure_logging(level):
-    """Configure console logging suitable for journald."""
     logging.basicConfig(
         level=getattr(logging, level),
         format="%(asctime)s %(levelname)s %(name)s: %(message)s",
@@ -419,7 +627,6 @@ def configure_logging(level):
 
 
 def prompt_for_callsign(default):
-    """Prompt an interactive user to create a sender callsign."""
     while True:
         try:
             callsign = input(f"Create sender callsign [{default}]: ").strip() or default
@@ -432,27 +639,62 @@ def prompt_for_callsign(default):
 
 
 def run_daemon(chat):
-    """Wait for SIGINT or SIGTERM while the listener runs."""
     stopped = threading.Event()
 
     def stop(_signal_number, _frame):
         stopped.set()
 
+    def reload_contacts(_signal_number, _frame):
+        chat.reload_contacts()
+
     signal.signal(signal.SIGINT, stop)
     signal.signal(signal.SIGTERM, stop)
-    LOGGER.info("Kaonic daemon ready; peers: %s", chat.peer_names())
+    if hasattr(signal, "SIGHUP"):
+        signal.signal(signal.SIGHUP, reload_contacts)
+    LOGGER.info("Krasp daemon ready; peers: %s", chat.peer_names())
     stopped.wait()
 
 
+def create_chat_with_retries(args, callsign, peers):
+    listen_port = 0 if args.send else args.port
+    attempts = max(0, args.bind_retries) + 1
+    last_error = None
+
+    for attempt in range(1, attempts + 1):
+        try:
+            return KaonicChat(
+                callsign,
+                args.listen_ip,
+                listen_port,
+                peers,
+                contacts_path=args.contacts,
+                contact_save_path=args.user_contacts,
+                inbox_path=args.inbox[0] if args.inbox else None,
+                default_port=args.port,
+                resolve_timeout=args.resolve_timeout,
+            )
+        except OSError as error:
+            last_error = error
+            if attempt == attempts:
+                break
+            time.sleep(max(0.0, args.bind_retry_delay))
+
+    raise OSError(f"could not bind UDP port after {attempts} attempts: {last_error}")
+
+
 def main():
-    """Run the Kaonic messenger."""
     parser = build_parser()
     args = parser.parse_args()
     configure_logging(args.log_level)
 
+    if args.show_inbox is not None:
+        return show_inbox(args.inbox, args.show_inbox)
+
     try:
         validate_port(args.port)
         peers = load_contacts(args.contacts, args.port)
+        if args.user_contacts:
+            peers.update(load_contacts(args.user_contacts, args.port, warn_missing=False))
         for peer_text in args.peer:
             name, host, port = parse_peer(peer_text)
             peers[name] = (host, port or args.port)
@@ -465,14 +707,13 @@ def main():
         callsign = prompt_for_callsign(default_callsign)
 
     try:
-        listen_port = 0 if args.send else args.port
-        chat = KaonicChat(callsign, args.listen_ip, listen_port, peers)
+        chat = create_chat_with_retries(args, callsign, peers)
     except ValueError as error:
         parser.error(str(error))
     except OSError as error:
-        parser.error(f"could not bind UDP port: {error}")
+        parser.error(str(error))
 
-    listener = threading.Thread(target=chat.listen_loop, name="kaonic-udp", daemon=True)
+    listener = threading.Thread(target=chat.listen_loop, name="krasp-udp", daemon=True)
     listener.start()
 
     exit_code = 0
