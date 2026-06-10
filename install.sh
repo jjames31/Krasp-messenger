@@ -19,10 +19,10 @@ usage() {
     cat <<'EOF'
 Usage: ./install.sh [options]
 
-Install and configure Kaonic Messenger on a Raspberry Pi.
+Install and configure Krasp Messenger on a Linux device.
 
 Options:
-  --callsign NAME       Sender/receiver callsign for this Pi
+  --callsign NAME       Sender/receiver callsign for this node
   --port PORT           UDP listening port (default: 6969)
   --peer NAME=HOST      Add a receiver; may be repeated
   --non-interactive     Accept defaults without prompting
@@ -76,7 +76,7 @@ if [[ -z "$ROOT" && "$EUID" -ne 0 ]]; then
 fi
 
 if [[ "$NON_INTERACTIVE" == false && -t 0 ]]; then
-    read -r -p "Callsign for this Pi [$CALLSIGN]: " answer
+    read -r -p "Callsign for this node [$CALLSIGN]: " answer
     CALLSIGN="${answer:-$CALLSIGN}"
     read -r -p "UDP port [$PORT]: " answer
     PORT="${answer:-$PORT}"
@@ -164,7 +164,7 @@ fi
 
 cat <<EOF
 
-Kaonic Messenger is configured.
+Krasp Messenger is configured.
   Callsign: $CALLSIGN
   UDP port: $PORT
   Contacts: ${CONFIG_DIR}/contacts.json
