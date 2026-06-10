@@ -2,6 +2,7 @@
 
 import argparse
 from collections import deque
+from datetime import datetime
 import json
 import logging
 from pathlib import Path
@@ -23,6 +24,29 @@ from udp import UdpTransport
 DEFAULT_PORT = 6969
 DEFAULT_CONTACTS = Path(__file__).with_name("contacts.json")
 LOGGER = logging.getLogger("kaonic")
+ANSI_RESET = "\033[0m"
+ANSI_BOLD = "\033[1m"
+ANSI_DIM = "\033[90m"
+ANSI_GREEN = "\033[32m"
+ANSI_RED = "\033[31m"
+
+
+def _fmt_time(unix_ts):
+    """Format a Unix timestamp for compact terminal display."""
+    try:
+        return datetime.fromtimestamp(int(unix_ts)).strftime("%H:%M")
+    except (OSError, OverflowError, TypeError, ValueError):
+        return "--:--"
+
+
+def _warn(message):
+    """Print a highlighted terminal warning."""
+    print(f"{ANSI_RED}! {message}{ANSI_RESET}")
+
+
+def _info(message):
+    """Print a dim terminal note."""
+    print(f"{ANSI_DIM}  {message}{ANSI_RESET}")
 
 
 def validate_callsign(callsign):
@@ -153,7 +177,11 @@ class KaonicChat:  # pylint: disable=too-many-instance-attributes
             return
 
         if self.interactive:
-            print(f"\n[{packet['sender']} -> {self.name}] {packet['body']}")
+            sent_at = _fmt_time(packet.get("sent_at"))
+            print(
+                f"\n{ANSI_GREEN}◀ {packet['sender']}{ANSI_RESET} "
+                f"({sent_at}): {packet['body']}"
+            )
             print(self.terminal_prompt(), end="", flush=True)
         else:
             LOGGER.info("message from %s: %s", packet["sender"], packet["body"])
@@ -166,7 +194,7 @@ class KaonicChat:  # pylint: disable=too-many-instance-attributes
     def _receive_ack(self, packet):
         message_id = packet["message_id"]
         if self.interactive:
-            print(f"\n[delivered to {packet['sender']}]")
+            print(f"\n{ANSI_DIM}✓ Delivered to {packet['sender']}{ANSI_RESET}")
             print(self.terminal_prompt(), end="", flush=True)
         else:
             LOGGER.info("%s acknowledged message %s", packet["sender"], message_id)
@@ -222,7 +250,11 @@ class KaonicChat:  # pylint: disable=too-many-instance-attributes
 
     def terminal_prompt(self):
         """Return the interactive chat prompt."""
-        return f"{self.name} -> {self.active_receiver or 'no-receiver'} > "
+        if self.active_receiver:
+            receiver_part = f"{ANSI_BOLD}{self.active_receiver}{ANSI_RESET}"
+        else:
+            receiver_part = f"{ANSI_DIM}no receiver{ANSI_RESET}"
+        return f"{self.name} → {receiver_part} › "
 
     def close(self):
         """Stop the node and close its socket."""
@@ -232,22 +264,23 @@ class KaonicChat:  # pylint: disable=too-many-instance-attributes
     def input_loop(self, default_port, initial_receiver=None):
         """Run the interactive callsign-to-callsign terminal."""
         self.interactive = True
-        print()
-        print("KAONIC TERMINAL")
-        print(f"Sender callsign: {self.name}")
-        print(f"Listening on UDP port {self.port}")
-        print("Type /help for commands.")
-        print()
+        print("\n" + "─" * 40)
+        print("  Kaonic  |  terminal chat")
+        print("─" * 40)
+        print(f"  You are: {ANSI_BOLD}{self.name}{ANSI_RESET}")
+        print(f"  Listening on port {self.port}")
+        print("  /help for commands  |  /quit to exit")
+        print("─" * 40 + "\n")
 
         if initial_receiver:
             self._set_receiver_from_input(initial_receiver, default_port)
         elif self.peers:
-            print(f"Known receivers: {self.peer_names()}")
+            _info(f"Known receivers: {self.peer_names()}")
             receiver = self._read_line("Select receiver: ")
             if receiver:
                 self._set_receiver_from_input(receiver, default_port)
         else:
-            print("No receivers are configured.")
+            _warn("No receivers are configured.")
             receiver = self._read_line("Define receiver as CALLSIGN=HOST[:PORT]: ")
             if receiver:
                 self._set_receiver_from_input(receiver, default_port)
@@ -264,7 +297,8 @@ class KaonicChat:  # pylint: disable=too-many-instance-attributes
             elif self.active_receiver:
                 self.send_to(self.active_receiver, line)
             else:
-                print("Select a receiver first with /receiver CALLSIGN=HOST[:PORT]")
+                _warn("Select a receiver before sending.")
+                _info("Use /receiver CALLSIGN=HOST[:PORT] to define one.")
 
         self.interactive = False
 
@@ -282,57 +316,58 @@ class KaonicChat:  # pylint: disable=too-many-instance-attributes
             if "=" in receiver:
                 name = self.define_receiver(receiver, default_port)
                 host, port = self.peers[name]
-                print(f"Receiver defined: {name} at {host}:{port}")
+                _info(f"Receiver defined: {name} at {host}:{port}")
             elif self.select_receiver(receiver):
-                print(f"Receiver selected: {receiver}")
+                _info(f"Receiver selected: {receiver}")
             else:
-                print(f"Unknown receiver: {receiver}")
-                print("Define it with /receiver CALLSIGN=HOST[:PORT]")
+                _warn(f"Unknown receiver: {receiver}")
+                _info("Define it with /receiver CALLSIGN=HOST[:PORT]")
         except ValueError as error:
-            print(f"Invalid receiver: {error}")
+            _warn(f"Invalid receiver: {error}")
 
     def _run_terminal_command(self, line, default_port):  # pylint: disable=too-many-branches
         command, _, argument = line.partition(" ")
         argument = argument.strip()
 
         if command in ("/help", "/?"):
-            print("  Type a message              send to the active receiver")
-            print("  /receiver CALLSIGN          select a known receiver")
-            print("  /receiver CALLSIGN=HOST     define and select a receiver")
-            print("  /to CALLSIGN message        send one message to another receiver")
-            print("  /callsign CALLSIGN          change your sender callsign")
-            print("  /contacts                   list known receivers")
-            print("  /status                     show sender and receiver")
-            print("  /quit                       close the terminal")
+            print("  Just type to send a message to your active contact.")
+            print("  /receiver pi-b       — switch to pi-b")
+            print("  /receiver pi-b=host  — add pi-b and switch to them")
+            print("  /to pi-b hello       — one-off message")
+            print("  /contacts            — list everyone you know")
+            print("  /status              — who you are and who you're talking to")
+            print("  /callsign newname    — change your name")
+            print("  /quit                — close the terminal")
         elif command == "/receiver":
             if argument:
                 self._set_receiver_from_input(argument, default_port)
             else:
-                print("Usage: /receiver CALLSIGN or /receiver CALLSIGN=HOST[:PORT]")
+                _warn("Usage: /receiver CALLSIGN or /receiver CALLSIGN=HOST[:PORT]")
         elif command == "/to":
             target, separator, message = argument.partition(" ")
             if separator and message:
                 self.send_to(target, message)
             else:
-                print("Usage: /to CALLSIGN message")
+                _warn("Usage: /to CALLSIGN message")
         elif command in ("/contacts", "/peers"):
             for name, (host, port) in sorted(self.peers.items()):
                 selected = " *" if name == self.active_receiver else ""
                 print(f"{name}: {host}:{port}{selected}")
             if not self.peers:
-                print("(no receivers defined)")
+                _info("No receivers defined")
         elif command == "/callsign":
             try:
                 self.name = validate_callsign(argument)
-                print(f"Sender callsign changed to {self.name}")
+                _info(f"Sender callsign changed to {self.name}")
             except ValueError as error:
-                print(f"Invalid callsign: {error}")
+                _warn(f"Invalid callsign: {error}")
         elif command == "/status":
+            receiver = self.active_receiver or "(not selected)"
             print(f"Sender: {self.name}")
-            print(f"Receiver: {self.active_receiver or '(not selected)'}")
+            print(f"Receiver: {receiver}")
             print(f"UDP port: {self.port}")
         else:
-            print("Unknown command. Type /help for commands.")
+            _warn("Unknown command. Type /help for commands.")
 
 
 def build_parser():
@@ -393,7 +428,7 @@ def prompt_for_callsign(default):
         try:
             return validate_callsign(callsign)
         except ValueError as error:
-            print(f"Invalid callsign: {error}")
+            _warn(f"Invalid callsign: {error}")
 
 
 def run_daemon(chat):
