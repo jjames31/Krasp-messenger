@@ -82,13 +82,15 @@ PY
     return 1
 }
 
-common_app_args() {
-    printf '%s\0' \
-        --callsign "$KAONIC_CALLSIGN" \
-        --port "$KAONIC_PORT" \
-        --contacts "$CONTACTS_FILE" \
-        --user-contacts "$USER_CONTACTS_FILE" \
-        --inbox "$USER_INBOX_FILE"
+join_message_args() {
+    local message="${1:-}"
+    shift || true
+
+    for word in "$@"; do
+        message+=" $word"
+    done
+
+    printf '%s' "$message"
 }
 
 run_chat() {
@@ -144,7 +146,7 @@ case "${1:-chat}" in
         }
         receiver="$2"
         shift 2
-        message="$*"
+        message="$(join_message_args "$@")"
         python3 "$INSTALL_DIR/app.py" \
             --callsign "$KAONIC_CALLSIGN" \
             --port "$KAONIC_PORT" \
