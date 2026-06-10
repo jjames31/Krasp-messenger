@@ -1,34 +1,42 @@
-# Kaonic Messenger on Raspberry Pi
+# Krasp Messenger on Raspberry Pi
 
-Kaonic Messenger is a small, dependency-free UDP messenger intended for
-always-on Raspberry Pi nodes on a trusted local network. Each node listens on
-UDP port `6969`, accepts versioned Kaonic JSON packets, and acknowledges valid
-messages.
+Krasp Messenger is a small UDP chat tool for two Raspberry Pi nodes on a trusted
+local network. Each Pi listens on UDP port `6969`, sends simple JSON packets, and
+acks messages when they arrive.
 
-## Automatic Installation
+I mainly use it for quick Pi-to-Pi testing, so it does not try to be a secure
+chat app. Keep it on your LAN, VPN, or another network you trust.
 
-Run the executable installer on each Pi:
+## Install
+
+Run the installer on each Pi:
 
 ```bash
 ./install.sh
 ```
 
-The installer asks for this Pi's callsign and receivers, installs the `kaonic`
-command, configures the background receiver service, and opens UDP port `6969`
-when UFW is active. Run `./install.sh` again whenever you want to reconfigure
-the Pi.
+The installer asks for this Pi's callsign and any receivers you want to save. It
+also installs the terminal command, sets up the background receiver service, and
+opens UDP port `6969` when UFW is active.
 
-```bash
-kaonic
-```
+Run the installer again any time you want to reconfigure the Pi.
 
-For an unattended installation, configure each node with generic names such as
-`pi-a` and `pi-b`:
+## Example setup
+
+For Pi A:
 
 ```bash
 sudo ./install.sh --non-interactive \
   --callsign pi-a \
   --peer pi-b=pi-b.local
+```
+
+For Pi B:
+
+```bash
+sudo ./install.sh --non-interactive \
+  --callsign pi-b \
+  --peer pi-a=pi-a.local
 ```
 
 ## Commands
@@ -41,11 +49,21 @@ kaonic logs                    # follow received messages
 kaonic restart                 # reload configuration
 ```
 
-Inside the terminal, use `/receiver`, `/to`, `/callsign`, `/contacts`,
-`/status`, and `/quit`. Defining a receiver in the terminal lasts until the
-program exits; add it to `contacts.json` to keep it permanently.
+Inside the terminal:
+
+```text
+/receiver pi-b       switch to pi-b
+/receiver pi-b=host  add pi-b and switch to it
+/to pi-b hello       send a one-off message
+/contacts            list saved receivers
+/status              show this Pi and active receiver
+/callsign newname    change the sender name
+/quit                exit
+```
+
+Temporary receivers only last until the terminal exits. Add them to
+`contacts.json`, or run the installer again, to keep them permanently.
 
 Persistent contacts are stored in `/etc/kaonic-messenger/contacts.json`.
 Raspberry Pi OS usually advertises `.local` hostnames, so fixed IP addresses are
-not required. This protocol is not encrypted or authenticated; keep it on a
-trusted LAN or VPN.
+not required.
