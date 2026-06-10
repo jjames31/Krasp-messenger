@@ -1,5 +1,5 @@
 [Unit]
-Description=Kaonic UDP Messenger
+Description=Krasp UDP Messenger
 After=network-online.target
 Wants=network-online.target
 
@@ -9,12 +9,12 @@ User=kaonic
 Group=kaonic
 WorkingDirectory=/opt/kaonic-messenger
 Environment=PYTHONDONTWRITEBYTECODE=1
-Environment=KAONIC_CALLSIGN=kaonic-pi
-Environment=KAONIC_PORT=6969
-EnvironmentFile=-/etc/default/kaonic-messenger
-ExecStart=/usr/bin/python3 /opt/kaonic-messenger/app.py --callsign ${KAONIC_CALLSIGN} --port ${KAONIC_PORT} --daemon --contacts /etc/kaonic-messenger/contacts.json
+EnvironmentFile=/etc/default/kaonic-messenger
+ExecStart=/usr/bin/python3 /opt/kaonic-messenger/app.py --callsign ${KAONIC_CALLSIGN} --port ${KAONIC_PORT} --daemon --contacts /etc/kaonic-messenger/contacts.json --inbox /var/lib/kaonic-messenger/inbox.jsonl
+ExecReload=/bin/kill -HUP $MAINPID
 Restart=on-failure
 RestartSec=3
+StateDirectory=kaonic-messenger
 NoNewPrivileges=true
 PrivateTmp=true
 ProtectHome=true
