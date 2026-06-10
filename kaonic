@@ -4,16 +4,23 @@ set -Eeuo pipefail
 INSTALL_DIR="${KAONIC_INSTALL_DIR:-/opt/kaonic-messenger}"
 DEFAULTS_FILE="${KAONIC_DEFAULTS_FILE:-/etc/default/kaonic-messenger}"
 CONTACTS_FILE="${KAONIC_CONTACTS_FILE:-/etc/kaonic-messenger/contacts.json}"
+USER_STATE_DIR="${XDG_STATE_HOME:-$HOME/.local/state}/krasp"
+USER_CONFIG_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/krasp"
+USER_CONTACTS_FILE="${KAONIC_USER_CONTACTS_FILE:-$USER_CONFIG_DIR/contacts.json}"
+USER_INBOX_FILE="${KAONIC_USER_INBOX_FILE:-$USER_STATE_DIR/inbox.jsonl}"
+SYSTEM_INBOX_FILE="${KAONIC_SYSTEM_INBOX_FILE:-/var/lib/kaonic-messenger/inbox.jsonl}"
 SERVICE_NAME="${KAONIC_SERVICE_NAME:-kaonic-messenger.service}"
 
 show_help() {
     cat <<'EOF'
 Usage:
   kaonic                         Open the terminal chat
-  kaonic send RECEIVER message  Send one message
-  kaonic status                 Show receiver service status
-  kaonic logs                   Follow received messages
-  kaonic restart                Restart the receiver service
+  kaonic send RECEIVER message   Send one message
+  kaonic inbox [COUNT]           Show recent received messages
+  kaonic status                  Show receiver service status
+  kaonic logs                    Follow received messages
+  kaonic reload                  Reload receiver contacts without restart
+  kaonic restart                 Restart the receiver service
 EOF
 }
 
@@ -23,11 +30,11 @@ if [[ "${1:-}" =~ ^(help|-h|--help)$ ]]; then
 fi
 
 if [[ ! -r "$DEFAULTS_FILE" ]]; then
-    printf 'Kaonic is not configured. Run the installer first.\n' >&2
+    printf 'Krasp is not configured. Run the installer first.\n' >&2
     exit 1
 fi
 
-# The installer only writes validated callsigns and numeric ports here.
+# The installer writes validated callsigns and numeric ports here.
 # shellcheck disable=SC1090
 source "$DEFAULTS_FILE"
 
@@ -39,18 +46,79 @@ run_systemctl() {
     fi
 }
 
+run_systemctl_noninteractive() {
+    if [[ "$EUID" -eq 0 ]]; then
+        systemctl "$@"
+    else
+        sudo -n systemctl "$@"
+    fi
+}
+
+wait_for_port_free() {
+    local port="$1"
+    local attempts=20
+
+    while ((attempts > 0)); do
+        python3 - "$port" <<'PY'
+import socket
+import sys
+
+port = int(sys.argv[1])
+sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+try:
+    sock.bind(("0.0.0.0", port))
+except OSError:
+    raise SystemExit(1)
+finally:
+    sock.close()
+PY
+        if [[ $? -eq 0 ]]; then
+            return 0
+        fi
+        sleep 0.1
+        attempts=$((attempts - 1))
+    done
+
+    return 1
+}
+
+common_app_args() {
+    printf '%s\0' \
+        --callsign "$KAONIC_CALLSIGN" \
+        --port "$KAONIC_PORT" \
+        --contacts "$CONTACTS_FILE" \
+        --user-contacts "$USER_CONTACTS_FILE" \
+        --inbox "$USER_INBOX_FILE"
+}
+
 run_chat() {
+    mkdir -p "$USER_STATE_DIR" "$USER_CONFIG_DIR"
+
     KAONIC_RESTART_SERVICE=false
     if systemctl is-active --quiet "$SERVICE_NAME" 2>/dev/null; then
+        if [[ "$EUID" -ne 0 ]] && ! sudo -n true 2>/dev/null; then
+            printf 'Need sudo once to pause and later resume the background receiver.\n'
+            sudo -v
+        fi
+
         KAONIC_RESTART_SERVICE=true
         printf 'Pausing the background receiver while the terminal is open...\n'
         run_systemctl stop "$SERVICE_NAME"
+
+        if ! wait_for_port_free "$KAONIC_PORT"; then
+            printf 'Port %s is still busy after stopping %s.\n' "$KAONIC_PORT" "$SERVICE_NAME" >&2
+            printf 'Try: kaonic status\n' >&2
+            exit 1
+        fi
     fi
 
     restart_receiver() {
         if [[ "${KAONIC_RESTART_SERVICE:-false}" == true ]]; then
             printf '\nRestarting the background receiver...\n'
-            run_systemctl start "$SERVICE_NAME"
+            if ! run_systemctl_noninteractive start "$SERVICE_NAME"; then
+                printf 'Could not restart %s without a sudo prompt.\n' "$SERVICE_NAME" >&2
+                printf 'Run this manually: sudo systemctl start %s\n' "$SERVICE_NAME" >&2
+            fi
         fi
     }
     trap restart_receiver EXIT
@@ -59,6 +127,8 @@ run_chat() {
         --callsign "$KAONIC_CALLSIGN" \
         --port "$KAONIC_PORT" \
         --contacts "$CONTACTS_FILE" \
+        --user-contacts "$USER_CONTACTS_FILE" \
+        --inbox "$USER_INBOX_FILE" \
         "$@"
 }
 
@@ -74,17 +144,29 @@ case "${1:-chat}" in
         }
         receiver="$2"
         shift 2
+        message="$*"
         python3 "$INSTALL_DIR/app.py" \
             --callsign "$KAONIC_CALLSIGN" \
             --port "$KAONIC_PORT" \
             --contacts "$CONTACTS_FILE" \
-            --send "$receiver" "$*"
+            --user-contacts "$USER_CONTACTS_FILE" \
+            --send "$receiver" "$message"
+        ;;
+    inbox)
+        count="${2:-20}"
+        python3 "$INSTALL_DIR/app.py" \
+            --inbox "$USER_INBOX_FILE" \
+            --inbox "$SYSTEM_INBOX_FILE" \
+            --show-inbox "$count"
         ;;
     status)
         systemctl status "$SERVICE_NAME"
         ;;
     logs)
         journalctl -u "$SERVICE_NAME" -f
+        ;;
+    reload)
+        run_systemctl reload "$SERVICE_NAME"
         ;;
     restart)
         run_systemctl restart "$SERVICE_NAME"
