@@ -72,6 +72,56 @@ that is reachable across the Kaonic network, VPN, or tunnel. Do not assume the
 Kaonic dashboard address is the peer address; use the address assigned to the
 host or the tunnel IP shown by the Kaonic network tools.
 
+### Finding the correct IP address
+
+On each Linux host, list IPv4 addresses:
+
+```bash
+ip -4 -br addr
+```
+
+Example output:
+
+```text
+lo               UNKNOWN        127.0.0.1/8
+eth0             UP             192.168.1.55/24
+wlan0            UP             192.168.1.80/24
+usb0             UP             192.168.10.2/24
+```
+
+The Kaonic-facing interface is usually the interface that appears when the
+Kaonic is plugged in, such as `usb0`, `eth1`, `enx...`, or `enp...`. To identify
+it, run `ip -4 -br addr`, unplug the Kaonic, run it again, then plug the Kaonic
+back in and run it a third time. The interface that disappears and reappears is
+the local Kaonic-side interface.
+
+Use the other node's reachable host IP as the peer address:
+
+```text
+My local Kaonic-side IP  = the address shown on this host
+Peer destination IP      = the other host's Kaonic-side IP
+```
+
+For example, if node A is `10.42.0.10` and node B is `10.42.0.20`:
+
+```bash
+# On node A
+python3 app.py --callsign node-a --peer node-b=10.42.0.20
+
+# On node B
+python3 app.py --callsign node-b --peer node-a=10.42.0.10
+```
+
+`--listen-ip` is normally not needed because Krasp listens on `0.0.0.0` by
+default, which means all local interfaces. Only set `--listen-ip` when you want
+Krasp to listen on one specific interface:
+
+```bash
+python3 app.py --callsign node-a \
+  --listen-ip 10.42.0.10 \
+  --peer node-b=10.42.0.20
+```
+
 A typical test looks like this:
 
 ```bash
